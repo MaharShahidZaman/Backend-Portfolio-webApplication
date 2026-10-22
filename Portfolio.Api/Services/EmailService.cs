@@ -1,63 +1,83 @@
-using MailKit.Net.Smtp;
-using MailKit.Security;
 using Microsoft.Extensions.Options;
-using MimeKit;
 using Portfolio.Api.Models;
 using Portfolio.Api.Settings;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 
 namespace Portfolio.Api.Services;
 
 public sealed class EmailService(
-    IOptions<EmailSettings> emailOptions,
+    HttpClient httpClient,
+    IOptions<ResendSettings> resendOptions,
     ILogger<EmailService> logger) : IEmailService
 {
-    private readonly EmailSettings _settings = emailOptions.Value;
+    private readonly ResendSettings _settings = resendOptions.Value;
 
     public async Task SendContactNotificationAsync(ContactMessage contactMessage, CancellationToken cancellationToken)
     {
         ValidateConfiguration();
 
-        var notification = new MimeMessage();
-        notification.From.Add(MailboxAddress.Parse(_settings.FromEmail));
-        notification.To.Add(MailboxAddress.Parse(_settings.ToEmail));
-        notification.ReplyTo.Add(new MailboxAddress(contactMessage.Name, contactMessage.Email));
-        notification.Subject = $"Portfolio contact: {contactMessage.Subject}";
-
-        notification.Body = new TextPart("plain")
+        var payload = new
         {
-            Text = $"A new portfolio contact message was received.\n\n" +
-                   $"Name: {contactMessage.Name}\n" +
-                   $"Email: {contactMessage.Email}\n" +
-                   $"Subject: {contactMessage.Subject}\n" +
-                   $"Submitted (UTC): {contactMessage.CreatedAt:O}\n\n" +
-                   $"Message:\n{contactMessage.Message}"
+            from = _settings.FromEmail,
+            to = new[] { _settings.ToEmail },
+            subject = $"New Portfolio Contact: {contactMessage.Subject}",
+            html = BuildHtmlBody(contactMessage)
         };
 
-        using var client = new SmtpClient();
-        var socketOptions = _settings.UseSsl ? SecureSocketOptions.StartTls : SecureSocketOptions.None;
-        await client.ConnectAsync(_settings.Host, _settings.Port, socketOptions, cancellationToken);
-
-        if (!string.IsNullOrWhiteSpace(_settings.Username))
+        using var request = new HttpRequestMessage(HttpMethod.Post, "emails")
         {
-            await client.AuthenticateAsync(_settings.Username, _settings.Password, cancellationToken);
+            Content = JsonContent.Create(payload)
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _settings.ApiKey);
+
+        try
+        {
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogError("Resend returned non-success status code {StatusCode} for contact message {ContactMessageId}.",
+                    (int)response.StatusCode, contactMessage.Id);
+                throw new HttpRequestException("The email notification provider returned an unsuccessful response.", null, response.StatusCode);
+            }
+
+            logger.LogInformation("Email notification sent for contact message {ContactMessageId}.", contactMessage.Id);
         }
-
-        await client.SendAsync(notification, cancellationToken);
-        await client.DisconnectAsync(true, cancellationToken);
-
-        logger.LogInformation("Email notification sent to {Recipient} for contact message from {SenderEmail}.",
-            _settings.ToEmail, contactMessage.Email);
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Resend email request failed for contact message {ContactMessageId}.", contactMessage.Id);
+            throw;
+        }
     }
 
     private void ValidateConfiguration()
     {
-        if (string.IsNullOrWhiteSpace(_settings.Host) ||
-            _settings.Port is < 1 or > 65535 ||
+        if (string.IsNullOrWhiteSpace(_settings.ApiKey) ||
             string.IsNullOrWhiteSpace(_settings.FromEmail) ||
             string.IsNullOrWhiteSpace(_settings.ToEmail))
         {
             throw new InvalidOperationException(
-                "Email notification settings are incomplete. Configure EmailSettings before enabling notifications.");
+                "Resend notification settings are incomplete. Configure Resend settings before enabling notifications.");
         }
     }
+
+    private static string BuildHtmlBody(ContactMessage contactMessage) => $"""
+        <h2>New portfolio contact message</h2>
+        <p><strong>Name:</strong> {HtmlEncode(contactMessage.Name)}</p>
+        <p><strong>Email:</strong> {HtmlEncode(contactMessage.Email)}</p>
+        <p><strong>Subject:</strong> {HtmlEncode(contactMessage.Subject)}</p>
+        <p><strong>Submitted at (UTC):</strong> {HtmlEncode(contactMessage.CreatedAt.ToString("O"))}</p>
+        <p><strong>Message:</strong><br />{HtmlEncodeWithLineBreaks(contactMessage.Message)}</p>
+        """;
+
+    private static string HtmlEncode(string value) => WebUtility.HtmlEncode(value);
+
+    private static string HtmlEncodeWithLineBreaks(string value) =>
+        HtmlEncode(value).Replace("\r\n", "<br />", StringComparison.Ordinal).Replace("\n", "<br />", StringComparison.Ordinal);
 }

@@ -27,8 +27,14 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 builder.Services
-    .AddOptions<EmailSettings>()
-    .Bind(builder.Configuration.GetSection(EmailSettings.SectionName));
+    .AddOptions<ResendSettings>()
+    .Bind(builder.Configuration.GetSection(ResendSettings.SectionName))
+    .ValidateDataAnnotations();
+
+if (builder.Environment.IsProduction())
+{
+    builder.Services.AddOptions<ResendSettings>().ValidateOnStart();
+}
 
 var allowedOrigins = builder.Configuration.GetSection("AllowedOrigins").Get<string[]>() ?? [];
 builder.Services.AddCors(options => options.AddPolicy("PortfolioFrontend", policy =>
@@ -61,7 +67,11 @@ builder.Services.AddRateLimiter(options =>
 });
 
 builder.Services.AddScoped<IContactService, ContactService>();
-builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddHttpClient<IEmailService, EmailService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.resend.com/");
+    client.Timeout = TimeSpan.FromSeconds(15);
+});
 
 var app = builder.Build();
 
