@@ -19,7 +19,10 @@ public sealed class ApplicationDbContext(DbContextOptions<ApplicationDbContext> 
             entity.Property(message => message.Email).HasMaxLength(254).IsRequired();
             entity.Property(message => message.Subject).HasMaxLength(200).IsRequired();
             entity.Property(message => message.Message).HasMaxLength(5000).IsRequired();
-            entity.Property(message => message.CreatedAt).IsRequired();
+            // Npgsql maps this to PostgreSQL timestamptz; values must be UTC.
+            entity.Property(message => message.CreatedAt)
+                .HasColumnType("timestamp with time zone")
+                .IsRequired();
             entity.Property(message => message.IsRead).HasDefaultValue(false).IsRequired();
         });
     }
